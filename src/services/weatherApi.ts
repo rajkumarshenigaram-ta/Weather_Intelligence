@@ -134,36 +134,274 @@ export function getWeatherInfo(code: number, isDay: boolean = true): WeatherCond
 }
 
 /**
- * Searches cities using Open-Meteo Geocoding API
+ * Normalize strings by removing diacritics, lowercase, and stripping non-alphanumeric chars
+ */
+export function cleanCityString(str: string): string {
+  return str
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // remove diacritics
+    .replace(/[^a-z0-9\s]/g, ' ')   // strip symbols
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Calculates Levenshtein distance between two strings
+ */
+export function calculateLevenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,      // deletion
+        dp[i][j - 1] + 1,      // insertion
+        dp[i - 1][j - 1] + cost // substitution
+      );
+    }
+  }
+  return dp[m][n];
+}
+
+/**
+ * Common city abbreviations or aliases
+ */
+export const CITY_ALIASES: Record<string, string> = {
+  nyc: 'New York',
+  la: 'Los Angeles',
+  sf: 'San Francisco',
+  dc: 'Washington',
+  rio: 'Rio de Janeiro',
+};
+
+/**
+ * Common keyboard walk sequences and spam patterns
+ */
+const KEYBOARD_MASH_PATTERNS = [
+  'qwerty', 'asdfgh', 'zxcvbn', 'qwert', 'asdfg', 'zxcvb',
+  'qwer', 'asdf', 'zxcv', 'qwe', 'asd', 'zxc',
+  'uiop', 'hjkl', 'bnm', 'lkjh', 'fdsa', 'poiuy', 'rewq',
+  'blabla', 'test'
+];
+
+/**
+ * Checks if a search query is random gibberish, pure numbers, or invalid text
+ */
+export function isGibberishOrInvalidQuery(query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed || trimmed.length < 2) return true;
+
+  // Must contain at least one alphabetic letter
+  if (!/[a-zA-Z\u00C0-\u024F\u1E00-\u1EFF]/.test(trimmed)) {
+    return true;
+  }
+
+  // Letters must make up at least 50% of the query (rejects '1234a', '!@#$a', etc.)
+  const lettersCount = (trimmed.match(/[a-zA-Z\u00C0-\u024F\u1E00-\u1EFF]/g) || []).length;
+  const nonSpaceChars = trimmed.replace(/\s+/g, '').length;
+  if (nonSpaceChars > 0 && lettersCount / nonSpaceChars < 0.5) {
+    return true;
+  }
+
+  const alphaLower = trimmed.toLowerCase().replace(/[^a-z]/g, '');
+
+  // Check keyboard mash patterns (e.g. 'asdf', 'qwerty', 'asd')
+  if (KEYBOARD_MASH_PATTERNS.includes(alphaLower)) {
+    return true;
+  }
+  for (const mash of KEYBOARD_MASH_PATTERNS) {
+    if (mash.length >= 4 && alphaLower.includes(mash)) {
+      return true;
+    }
+  }
+
+  // If 4+ chars and contains no vowels at all (e.g. 'dfgh', 'zxcvb')
+  if (trimmed.length >= 4 && !/[aeiouy\u00C0-\u024F\u1E00-\u1EFF]/i.test(trimmed)) {
+    return true;
+  }
+
+  // 3+ identical consecutive characters (e.g. 'aaaa', 'zzzzzz')
+  if (/(.)\1{2,}/i.test(trimmed)) {
+    return true;
+  }
+
+  // Repeating syllables or keyboard spam like 'blablabla', 'asdfasdf'
+  if (/^(.{2,4})\1{2,}$/i.test(trimmed)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Validates whether a candidate city closely matches the user's query
+ */
+export function validateAndScoreCityMatch(
+  query: string,
+  city: {
+    name: string;
+    country?: string;
+    admin1?: string;
+    country_code?: string;
+    population?: number;
+  }
+): { isMatch: boolean; score: number } {
+  if (isGibberishOrInvalidQuery(query)) {
+    return { isMatch: false, score: 0 };
+  }
+
+  const cleanQuery = cleanCityString(query);
+  const cleanName = cleanCityString(city.name);
+  const cleanCountry = cleanCityString(city.country || '');
+  const cleanAdmin = cleanCityString(city.admin1 || '');
+  const cleanCode = cleanCityString(city.country_code || '');
+
+  // Check alias match (e.g. 'nyc' -> 'New York', 'sf' -> 'San Francisco')
+  const resolvedAlias = CITY_ALIASES[cleanQuery];
+  if (resolvedAlias && cleanCityString(resolvedAlias) === cleanName) {
+    return { isMatch: true, score: 1.0 };
+  }
+
+  // Split query on comma if user typed 'City, Region' (e.g. 'Paris, France' or 'Portland, OR')
+  let cityPart = cleanQuery;
+  let regionPart = '';
+  if (query.includes(',')) {
+    const parts = query.split(',');
+    cityPart = cleanCityString(parts[0]);
+    regionPart = cleanCityString(parts.slice(1).join(' '));
+  }
+
+  // 1. Exact name match
+  if (cleanName === cityPart) {
+    if (regionPart) {
+      const regionMatches =
+        cleanCountry.includes(regionPart) ||
+        cleanAdmin.includes(regionPart) ||
+        cleanCode === regionPart;
+      return { isMatch: true, score: regionMatches ? 1.0 : 0.95 };
+    }
+    return { isMatch: true, score: 1.0 };
+  }
+
+  // 2. Prefix match (e.g. user typing 'san fran' or 'tok' for 'Tokyo')
+  if (cityPart.length >= 3) {
+    if (cleanName.startsWith(cityPart)) {
+      // For short 3-letter queries, require significant population or short city name
+      if (cityPart.length === 3) {
+        const pop = city.population || 0;
+        if (pop >= 10000 || cleanName.length <= 6) {
+          return { isMatch: true, score: 0.92 };
+        }
+      } else {
+        return { isMatch: true, score: 0.92 };
+      }
+    }
+    // Or city name is prefix of query (e.g. query is 'San Francisco CA')
+    if (cityPart.startsWith(cleanName) && cleanName.length >= 3) {
+      return { isMatch: true, score: 0.9 };
+    }
+  }
+
+  // 3. Word-level token match for multi-word city names (e.g. 'york' for 'New York', 'rio' for 'Rio de Janeiro')
+  const nameWords = cleanName.split(' ').filter(Boolean);
+  const queryWords = cityPart.split(' ').filter(Boolean);
+
+  if (queryWords.length === 1 && queryWords[0].length >= 3) {
+    if (nameWords.includes(queryWords[0])) {
+      return { isMatch: true, score: 0.88 };
+    }
+  } else if (queryWords.length > 1) {
+    const allMatch = queryWords.every((w) => nameWords.includes(w));
+    if (allMatch) {
+      return { isMatch: true, score: 0.94 };
+    }
+  }
+
+  // 4. Typo tolerance via Levenshtein edit distance
+  if (cityPart.length >= 4 && cleanName.length >= 3) {
+    const dist = calculateLevenshtein(cityPart, cleanName);
+    const maxLen = Math.max(cityPart.length, cleanName.length);
+    const similarity = 1 - dist / maxLen;
+
+    const maxAllowedDist = cityPart.length <= 4 ? 1 : cityPart.length <= 7 ? 2 : 3;
+    if (dist <= maxAllowedDist && similarity >= 0.72) {
+      return { isMatch: true, score: similarity * 0.85 };
+    }
+  }
+
+  return { isMatch: false, score: 0 };
+}
+
+/**
+ * Searches cities using Open-Meteo Geocoding API with strict validation to reject gibberish
  */
 export async function searchCities(query: string): Promise<GeoLocation[]> {
   const trimmed = query.trim();
-  if (!trimmed || trimmed.length < 2) {
+  if (!trimmed || trimmed.length < 2 || isGibberishOrInvalidQuery(trimmed)) {
     return [];
   }
 
-  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(trimmed)}&count=10&language=en&format=json`;
-  
+  const cleanQuery = cleanCityString(trimmed);
+  const resolvedQuery = CITY_ALIASES[cleanQuery] || trimmed;
+
+  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
+    resolvedQuery
+  )}&count=10&language=en&format=json`;
+
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error('Geocoding service unavailable');
   }
 
   const data = await response.json();
-  if (!data.results || !Array.isArray(data.results)) {
+  if (!data.results || !Array.isArray(data.results) || data.results.length === 0) {
     return [];
   }
 
-  return data.results.map((item: Record<string, unknown>) => ({
-    id: Number(item.id),
-    name: String(item.name),
-    latitude: Number(item.latitude),
-    longitude: Number(item.longitude),
-    country: item.country ? String(item.country) : undefined,
-    country_code: item.country_code ? String(item.country_code) : undefined,
-    admin1: item.admin1 ? String(item.admin1) : undefined,
-    timezone: item.timezone ? String(item.timezone) : undefined,
-  }));
+  // Validate and filter each result so only genuine close matches are returned
+  const matches: { location: GeoLocation; score: number }[] = [];
+
+  for (const item of data.results as Record<string, unknown>[]) {
+    const location: GeoLocation = {
+      id: Number(item.id),
+      name: String(item.name),
+      latitude: Number(item.latitude),
+      longitude: Number(item.longitude),
+      country: item.country ? String(item.country) : undefined,
+      country_code: item.country_code ? String(item.country_code) : undefined,
+      admin1: item.admin1 ? String(item.admin1) : undefined,
+      timezone: item.timezone ? String(item.timezone) : undefined,
+      population: item.population !== undefined ? Number(item.population) : undefined,
+    };
+
+    const validation = validateAndScoreCityMatch(trimmed, location);
+    if (validation.isMatch) {
+      matches.push({ location, score: validation.score });
+    }
+  }
+
+  // If no candidates closely match the user's search query, treat as unrecognized
+  if (matches.length === 0) {
+    return [];
+  }
+
+  // Sort by match score first, then by population for ties
+  matches.sort((a, b) => {
+    if (Math.abs(a.score - b.score) > 0.05) {
+      return b.score - a.score;
+    }
+    const popA = a.location.population || 0;
+    const popB = b.location.population || 0;
+    return popB - popA;
+  });
+
+  return matches.map((m) => m.location);
 }
 
 /**

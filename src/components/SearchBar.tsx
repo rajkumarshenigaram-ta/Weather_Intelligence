@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Search, MapPin, X, Loader2, Navigation } from 'lucide-react';
 import { GeoLocation } from '../types';
-import { searchCities } from '../services/weatherApi';
+import { searchCities, isGibberishOrInvalidQuery, validateAndScoreCityMatch } from '../services/weatherApi';
 import { WeatherTheme } from '../services/weatherTheme';
 
 interface SearchBarProps {
@@ -37,9 +37,10 @@ export const SearchBar: React.FC<SearchBarProps> = ({
   // Debounced search for suggestions dropdown
   useEffect(() => {
     const trimmed = query.trim();
-    if (trimmed.length < 2) {
+    if (trimmed.length < 2 || isGibberishOrInvalidQuery(trimmed)) {
       setSuggestions([]);
       setIsSearchingSuggestions(false);
+      setIsOpen(false);
       return;
     }
 
@@ -48,10 +49,11 @@ export const SearchBar: React.FC<SearchBarProps> = ({
       try {
         const results = await searchCities(trimmed);
         setSuggestions(results);
-        setIsOpen(true);
+        setIsOpen(results.length > 0);
       } catch (err) {
         console.error('Error fetching city suggestions:', err);
         setSuggestions([]);
+        setIsOpen(false);
       } finally {
         setIsSearchingSuggestions(false);
       }
@@ -76,9 +78,26 @@ export const SearchBar: React.FC<SearchBarProps> = ({
     const trimmed = query.trim();
     if (!trimmed) return;
 
-    if (suggestions.length > 0) {
-      handleSelect(suggestions[0]);
+    // Reject upfront if gibberish or invalid characters
+    if (isGibberishOrInvalidQuery(trimmed)) {
+      setSuggestions([]);
+      setIsOpen(false);
+      onSelectCity({
+        id: -1,
+        name: trimmed,
+        latitude: NaN,
+        longitude: NaN,
+      });
       return;
+    }
+
+    // If suggestions are loaded, ensure top suggestion is a confirmed close match
+    if (suggestions.length > 0) {
+      const match = validateAndScoreCityMatch(trimmed, suggestions[0]);
+      if (match.isMatch) {
+        handleSelect(suggestions[0]);
+        return;
+      }
     }
 
     setIsSearchingSuggestions(true);
@@ -87,6 +106,9 @@ export const SearchBar: React.FC<SearchBarProps> = ({
       if (results && results.length > 0) {
         handleSelect(results[0]);
       } else {
+        // Unrecognised city: trigger error state
+        setSuggestions([]);
+        setIsOpen(false);
         onSelectCity({
           id: -1,
           name: trimmed,
@@ -95,6 +117,8 @@ export const SearchBar: React.FC<SearchBarProps> = ({
         });
       }
     } catch {
+      setSuggestions([]);
+      setIsOpen(false);
       onSelectCity({
         id: -1,
         name: trimmed,

@@ -9,6 +9,7 @@ export interface GeoLocation {
   country_code?: string;
   admin1?: string; // State or region
   timezone?: string;
+  population?: number;
 }
 
 export interface CurrentWeather {
