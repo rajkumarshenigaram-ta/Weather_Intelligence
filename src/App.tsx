@@ -13,13 +13,15 @@ import { WeatherSkeleton } from './components/WeatherSkeleton';
 import { ErrorMessage } from './components/ErrorMessage';
 
 const DEFAULT_CITY: GeoLocation = {
-  id: 5391959,
-  name: 'San Francisco',
-  latitude: 37.7749,
-  longitude: -122.4194,
-  admin1: 'California',
-  country: 'United States',
-  country_code: 'US',
+  id: 2643743,
+  name: 'London',
+  latitude: 51.50853,
+  longitude: -0.12574,
+  admin1: 'England',
+  country: 'United Kingdom',
+  country_code: 'GB',
+  timezone: 'Europe/London',
+  population: 8961989,
 };
 
 // Preset weather condition themes for quick manual exploration

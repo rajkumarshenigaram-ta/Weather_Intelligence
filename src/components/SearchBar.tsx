@@ -12,8 +12,8 @@ interface SearchBarProps {
 }
 
 const POPULAR_CITIES: GeoLocation[] = [
+  { id: 2643743, name: 'London', latitude: 51.50853, longitude: -0.12574, admin1: 'England', country: 'United Kingdom', country_code: 'GB' },
   { id: 5391959, name: 'San Francisco', latitude: 37.7749, longitude: -122.4194, admin1: 'California', country: 'United States' },
-  { id: 2643743, name: 'London', latitude: 51.5085, longitude: -0.1257, country: 'United Kingdom' },
   { id: 1850147, name: 'Tokyo', latitude: 35.6895, longitude: 139.6917, country: 'Japan' },
   { id: 5128581, name: 'New York', latitude: 40.7143, longitude: -74.006, admin1: 'New York', country: 'United States' },
   { id: 2988507, name: 'Paris', latitude: 48.8534, longitude: 2.3488, country: 'France' },
@@ -33,17 +33,38 @@ export const SearchBar: React.FC<SearchBarProps> = ({
   const [locatingUser, setLocatingUser] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Track whether the user has actively typed into the search bar
+  const isUserTypingRef = useRef(false);
 
-  // Synchronize input text with the loaded city name so it remains visible after weather data loads
+  // Synchronize input text with the loaded city name without triggering suggestions or dropdown
   useEffect(() => {
     if (currentCityName && document.activeElement !== inputRef.current) {
+      isUserTypingRef.current = false;
       setQuery(currentCityName);
+      setIsOpen(false);
+      setSuggestions([]);
     }
   }, [currentCityName]);
 
-  // Debounced search for suggestions dropdown
+  // Debounced search for suggestions dropdown - ONLY when actively typed by the user
   useEffect(() => {
+    // Never search or open suggestions if user is not actively typing in the focused input
+    if (!isUserTypingRef.current || document.activeElement !== inputRef.current) {
+      setSuggestions([]);
+      setIsSearchingSuggestions(false);
+      setIsOpen(false);
+      return;
+    }
+
     const trimmed = query.trim();
+    // Do not show suggestions if query is identical to the current city
+    if (currentCityName && trimmed.toLowerCase() === currentCityName.toLowerCase()) {
+      setSuggestions([]);
+      setIsSearchingSuggestions(false);
+      setIsOpen(false);
+      return;
+    }
+
     if (trimmed.length < 2 || isGibberishOrInvalidQuery(trimmed)) {
       setSuggestions([]);
       setIsSearchingSuggestions(false);
@@ -52,11 +73,20 @@ export const SearchBar: React.FC<SearchBarProps> = ({
     }
 
     const timer = setTimeout(async () => {
+      // Re-check focus and user typing flag before dispatching request
+      if (!isUserTypingRef.current || document.activeElement !== inputRef.current) {
+        setSuggestions([]);
+        setIsOpen(false);
+        return;
+      }
+
       setIsSearchingSuggestions(true);
       try {
         const results = await searchCities(trimmed);
-        setSuggestions(results);
-        setIsOpen(results.length > 0);
+        if (isUserTypingRef.current && document.activeElement === inputRef.current) {
+          setSuggestions(results);
+          setIsOpen(results.length > 0);
+        }
       } catch (err) {
         console.error('Error fetching city suggestions:', err);
         setSuggestions([]);
@@ -67,13 +97,14 @@ export const SearchBar: React.FC<SearchBarProps> = ({
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [query]);
+  }, [query, currentCityName]);
 
   // Close dropdown on outside click
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setIsOpen(false);
+        isUserTypingRef.current = false;
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -82,6 +113,8 @@ export const SearchBar: React.FC<SearchBarProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    isUserTypingRef.current = false;
+    setIsOpen(false);
     const trimmed = query.trim();
     if (!trimmed) return;
 
@@ -138,6 +171,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({
   };
 
   const handleSelect = (city: GeoLocation) => {
+    isUserTypingRef.current = false;
     setQuery(city.name);
     setSuggestions([]);
     setIsOpen(false);
@@ -217,11 +251,23 @@ export const SearchBar: React.FC<SearchBarProps> = ({
             ref={inputRef}
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onFocus={() => {
-              if (suggestions.length > 0) setIsOpen(true);
+            onChange={(e) => {
+              isUserTypingRef.current = true;
+              setQuery(e.target.value);
             }}
-            placeholder="Search city, town, or location (e.g. San Francisco, Tokyo, Rome)..."
+            onFocus={() => {
+              if (isUserTypingRef.current && suggestions.length > 0) {
+                setIsOpen(true);
+              }
+            }}
+            onBlur={() => {
+              setTimeout(() => {
+                if (document.activeElement !== inputRef.current) {
+                  setIsOpen(false);
+                }
+              }, 200);
+            }}
+            placeholder="Search city, town, or location (e.g. London, Tokyo, Paris)..."
             aria-label="Search city name"
             className={`w-full pl-12 pr-11 py-3.5 rounded-2xl text-base font-medium shadow-xs transition-all outline-none ${
               isDark
@@ -236,6 +282,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({
               id="clear-search-btn"
               type="button"
               onClick={() => {
+                isUserTypingRef.current = false;
                 setQuery('');
                 setSuggestions([]);
                 setIsOpen(false);
