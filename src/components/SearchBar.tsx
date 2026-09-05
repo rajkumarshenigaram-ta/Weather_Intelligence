@@ -26,13 +26,20 @@ export const SearchBar: React.FC<SearchBarProps> = ({
   currentCityName,
   theme,
 }) => {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(currentCityName || '');
   const [suggestions, setSuggestions] = useState<GeoLocation[]>([]);
   const [isSearchingSuggestions, setIsSearchingSuggestions] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const [locatingUser, setLocatingUser] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Synchronize input text with the loaded city name so it remains visible after weather data loads
+  useEffect(() => {
+    if (currentCityName && document.activeElement !== inputRef.current) {
+      setQuery(currentCityName);
+    }
+  }, [currentCityName]);
 
   // Debounced search for suggestions dropdown
   useEffect(() => {
@@ -131,7 +138,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({
   };
 
   const handleSelect = (city: GeoLocation) => {
-    setQuery('');
+    setQuery(city.name);
     setSuggestions([]);
     setIsOpen(false);
     inputRef.current?.blur();

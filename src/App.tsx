@@ -33,14 +33,45 @@ const THEME_PRESETS = [
   { id: 'snow-day', label: 'Arctic Frost (Snow)', code: 71, isDay: true },
 ];
 
+const STORAGE_KEY_CITY_NAME = 'weather_active_city_name';
+const STORAGE_KEY_LOCATION = 'weather_active_location';
+
+function getInitialSavedCity(): { location: GeoLocation | null; cityName: string | null } {
+  try {
+    if (typeof window !== 'undefined') {
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlCity = urlParams.get('city')?.trim();
+      if (urlCity) {
+        return { location: null, cityName: urlCity };
+      }
+      const rawLoc = localStorage.getItem(STORAGE_KEY_LOCATION);
+      if (rawLoc) {
+        const parsed = JSON.parse(rawLoc);
+        if (parsed && typeof parsed.latitude === 'number' && !isNaN(parsed.latitude)) {
+          return { location: parsed, cityName: parsed.name };
+        }
+      }
+      const savedName = localStorage.getItem(STORAGE_KEY_CITY_NAME)?.trim();
+      if (savedName) {
+        return { location: null, cityName: savedName };
+      }
+    }
+  } catch {
+    // fallback
+  }
+  return { location: DEFAULT_CITY, cityName: DEFAULT_CITY.name };
+}
+
 export default function App() {
+  const initialSaved = useMemo(() => getInitialSavedCity(), []);
   const [weatherData, setWeatherData] = useState<WeatherData | null>(null);
   const [smartPlans, setSmartPlans] = useState<SmartPlanItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [unit, setUnit] = useState<TemperatureUnit>('celsius');
   const [selectedDayIndex, setSelectedDayIndex] = useState<number>(0);
-  const [currentLocation, setCurrentLocation] = useState<GeoLocation>(DEFAULT_CITY);
+  const [currentLocation, setCurrentLocation] = useState<GeoLocation>(initialSaved.location || DEFAULT_CITY);
+  const [activeCityName, setActiveCityName] = useState<string>(initialSaved.cityName || DEFAULT_CITY.name);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [manualThemeId, setManualThemeId] = useState<string>('auto');
@@ -58,6 +89,7 @@ export default function App() {
 
       setIsLoading(true);
       setError(null);
+      setActiveCityName(location.name);
 
       try {
         const data = await fetchWeatherData(location);
@@ -65,6 +97,23 @@ export default function App() {
         setCurrentLocation(location);
         setSelectedDayIndex(0);
         setLastUpdated(new Date());
+
+        // Persist active city and location to localStorage
+        try {
+          localStorage.setItem(STORAGE_KEY_CITY_NAME, location.name);
+          localStorage.setItem(STORAGE_KEY_LOCATION, JSON.stringify(location));
+        } catch (e) {
+          console.warn('Unable to persist active city to localStorage:', e);
+        }
+
+        // Keep URL query parameter in sync without page reload (e.g. ?city=London)
+        try {
+          const currentUrl = new URL(window.location.href);
+          currentUrl.searchParams.set('city', location.name);
+          window.history.replaceState({ city: location.name }, '', currentUrl.toString());
+        } catch (e) {
+          console.warn('Unable to update URL parameter:', e);
+        }
 
         // Generate smart planning advice
         const plans = generateSmartPlanning(data.daily, data.current, unit);
@@ -80,10 +129,112 @@ export default function App() {
     [unit]
   );
 
-  // Initial load
+  // Initial load: Read saved city from URL parameter or localStorage, falling back to default
   useEffect(() => {
-    loadWeather(DEFAULT_CITY);
+    let isCancelled = false;
+
+    const initializeCity = async () => {
+      // 1. Check URL query parameters (e.g., ?city=London)
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlCity = urlParams.get('city')?.trim();
+
+      // 2. Check localStorage
+      let storedLocation: GeoLocation | null = null;
+      let storedCityName: string | null = null;
+      try {
+        const rawLoc = localStorage.getItem(STORAGE_KEY_LOCATION);
+        if (rawLoc) {
+          const parsed = JSON.parse(rawLoc);
+          if (parsed && typeof parsed.latitude === 'number' && !isNaN(parsed.latitude)) {
+            storedLocation = parsed;
+          }
+        }
+        storedCityName = localStorage.getItem(STORAGE_KEY_CITY_NAME)?.trim() || null;
+      } catch (e) {
+        console.warn('Error reading from localStorage:', e);
+      }
+
+      // Priority 1: URL city parameter
+      if (urlCity) {
+        // Fast path: stored location matches URL city name
+        if (
+          storedLocation &&
+          storedLocation.name.toLowerCase() === urlCity.toLowerCase()
+        ) {
+          if (!isCancelled) loadWeather(storedLocation);
+          return;
+        }
+
+        // Fast path: matches DEFAULT_CITY
+        if (DEFAULT_CITY.name.toLowerCase() === urlCity.toLowerCase()) {
+          if (!isCancelled) loadWeather(DEFAULT_CITY);
+          return;
+        }
+
+        // Search for the city from the URL query
+        try {
+          const results = await searchCities(urlCity);
+          if (results.length > 0 && !isCancelled) {
+            loadWeather(results[0]);
+            return;
+          }
+        } catch (err) {
+          console.error('Failed searching city from URL query parameter:', err);
+        }
+      }
+
+      // Priority 2: Stored GeoLocation in localStorage
+      if (storedLocation) {
+        if (!isCancelled) loadWeather(storedLocation);
+        return;
+      }
+
+      // Priority 3: Stored city name in localStorage
+      if (storedCityName) {
+        try {
+          const results = await searchCities(storedCityName);
+          if (results.length > 0 && !isCancelled) {
+            loadWeather(results[0]);
+            return;
+          }
+        } catch (err) {
+          console.error('Failed searching city from localStorage:', err);
+        }
+      }
+
+      // Priority 4: Fallback to default city
+      if (!isCancelled) {
+        loadWeather(DEFAULT_CITY);
+      }
+    };
+
+    initializeCity();
+
+    return () => {
+      isCancelled = true;
+    };
   }, [loadWeather]);
+
+  // Handle browser back/forward history navigation
+  useEffect(() => {
+    const handlePopState = async () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlCity = urlParams.get('city')?.trim();
+      if (urlCity && urlCity.toLowerCase() !== currentLocation?.name.toLowerCase()) {
+        try {
+          const results = await searchCities(urlCity);
+          if (results.length > 0) {
+            loadWeather(results[0]);
+          }
+        } catch (err) {
+          console.warn('Error syncing popstate city:', err);
+        }
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [currentLocation, loadWeather]);
 
   // Recalculate smart plans when temperature unit changes
   useEffect(() => {
@@ -334,7 +485,7 @@ export default function App() {
         <SearchBar
           onSelectCity={handleSelectCity}
           isLoading={isLoading}
-          currentCityName={weatherData?.location.name}
+          currentCityName={weatherData?.location.name || activeCityName}
           theme={theme}
         />
 
