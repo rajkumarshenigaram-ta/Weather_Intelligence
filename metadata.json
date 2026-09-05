@@ -1,0 +1,7 @@
+{
+  "name": "Weather & Week Planner",
+  "description": "Check real-time weather, 7-day forecasts, temperature trends, and smart activity planning powered by Open-Meteo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
